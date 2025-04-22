@@ -34,16 +34,16 @@ class IssueAnalyzerAgent:
     """
     Agent for analyzing SonarQube issues and extracting relevant information.
     """
-    
+
     def __init__(self):
         """Initialize the issue analyzer agent."""
         self.api_key = GEMINI_API_KEY
-        
+
         # Validate configuration
         if not self.api_key:
             logger.error("Gemini API key not configured")
             raise ValueError("Gemini API key not configured")
-        
+
         # Initialize the LLM
         self.llm = GoogleGenerativeAI(
             model="gemini-pro",
@@ -52,14 +52,14 @@ class IssueAnalyzerAgent:
             top_p=0.95,
             max_output_tokens=2048
         )
-        
+
         # Create the prompt template
         self.prompt_template = PromptTemplate(
             input_variables=["rule", "message", "file", "line", "code_context"],
             template="""
 You are an expert code analyzer specializing in understanding SonarQube issues. Your task is to analyze the following issue and provide insights:
 
-1. **Issue Information**: 
+1. **Issue Information**:
    - SonarQube Rule: {rule} (the rule ID that was violated)
    - Message: {message} (a description of what was wrong)
    - Affected File: {file}
@@ -85,40 +85,53 @@ Return your analysis in the following JSON format:
 ```
 """
         )
-    
+
     def analyze_issue(self, input_data: IssueAnalysisInput) -> IssueAnalysisOutput:
         """
         Analyze a SonarQube issue.
-        
+
         Args:
             input_data: Input data containing the issue and context
-            
+
         Returns:
             Analysis output
         """
         issue = input_data.issue
         file_path = input_data.file_path
         context = input_data.context
-        
+
         # Extract issue information
         issue_key = issue.get('key', '')
         rule = issue.get('rule', '')
         message = issue.get('message', '')
         component = issue.get('component', '')
         line_number = issue.get('line', 1)
-        
+
         # Extract file path from component
         if not file_path:
             file_path = component.split(':')[-1]
-        
+
         # Extract context if not provided
         if not context:
-            context = extract_code_context(file_path, line_number)
-            
-            if not context:
-                logger.error(f"Could not extract context for issue {issue_key}")
-                raise ValueError(f"Could not extract context for issue {issue_key}")
-        
+            try:
+                context = extract_code_context(file_path, line_number)
+
+                if not context:
+                    logger.error(f"Could not extract context for issue {issue_key}")
+                    raise ValueError(f"Could not extract context for issue {issue_key}")
+            except Exception as e:
+                logger.error(f"Error extracting context for issue {issue_key}: {str(e)}")
+                # Create a minimal context as fallback
+                context = {
+                    'file_path': file_path,
+                    'target_line': line_number,
+                    'start_line': max(1, line_number - 5),
+                    'end_line': line_number + 5,
+                    'context_text': f"[Could not extract code context: {str(e)}]",
+                    'all_lines': [],
+                    'context_lines': []
+                }
+
         # Format the prompt
         prompt = self.prompt_template.format(
             rule=rule,
@@ -127,17 +140,17 @@ Return your analysis in the following JSON format:
             line=line_number,
             code_context=context['context_text']
         )
-        
+
         # Generate the analysis
         logger.info(f"Analyzing issue {issue_key} using Gemini")
         analysis_text = self.llm.invoke(prompt)
-        
+
         # Parse the analysis
         try:
             # Extract JSON from the response
             import json
             import re
-            
+
             # Find JSON in the response
             json_match = re.search(r'```json\s*(.*?)\s*```', analysis_text, re.DOTALL)
             if json_match:
@@ -161,7 +174,7 @@ Return your analysis in the following JSON format:
                 "fix_strategy": "Manual review required",
                 "complexity": "high"
             }
-        
+
         # Create the output
         output = IssueAnalysisOutput(
             issue_key=issue_key,
@@ -174,6 +187,6 @@ Return your analysis in the following JSON format:
             fix_strategy=analysis_json.get("fix_strategy", "Fix strategy not available"),
             complexity=analysis_json.get("complexity", "high")
         )
-        
+
         logger.info(f"Successfully analyzed issue {issue_key}")
         return output

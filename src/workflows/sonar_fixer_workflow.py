@@ -7,6 +7,7 @@ import time
 from datetime import datetime
 from pydantic import BaseModel, Field
 from langgraph.graph import StateGraph, END
+from git import Repo
 from src.utils.logger import setup_logger
 from src.sonarqube.issue_fetcher import SonarQubeIssueFetcher
 from src.git.repo_manager import GitRepoManager
@@ -174,8 +175,9 @@ def process_issues_parallel(state: WorkflowState) -> WorkflowState:
 
         # Apply fixes and commit changes
         git_manager = GitRepoManager()
-        git_manager._repo_path = state.repo_path
-        git_manager.repo = git_manager._repo_path
+        git_manager.repo_path = state.repo_path
+        # We need to recreate the repo object from the existing path
+        git_manager.repo = Repo(state.repo_path)
 
         for fix in state.fixed_issues:
             try:
@@ -184,9 +186,25 @@ def process_issues_parallel(state: WorkflowState) -> WorkflowState:
                 full_file_path = os.path.join(state.repo_path, file_path)
 
                 # Apply the fix
+                # The context might be missing in the fix object, so we need to handle that
+                context = None
+                if hasattr(fix, 'analysis'):
+                    context = fix.analysis.context
+                elif hasattr(fix, 'original_code'):
+                    # Create a simple context if we have the original code
+                    context = {
+                        'start_line': 1,
+                        'end_line': len(fix.original_code.split('\n')),
+                        'context_text': fix.original_code
+                    }
+
+                if context is None:
+                    logger.warning(f"Missing context for issue {fix.issue_key}. Cannot apply fix.")
+                    continue
+
                 success = code_fixer.apply_fix(
                     file_path=full_file_path,
-                    context=fix.analysis.context if hasattr(fix, 'analysis') else None,
+                    context=context,
                     fixed_code=fix.fixed_code
                 )
 
@@ -264,7 +282,7 @@ def process_issue(state: WorkflowState) -> WorkflowState:
         state.analyzed_issues.append(analysis)
 
         # Fix the issue
-        fix_input = CodeFixInput(analysis=analysis)
+        fix_input = CodeFixInput(analysis=analysis, use_memory=True)
         fix = code_fixer.fix_issue(fix_input)
 
         # Apply the fix
@@ -281,8 +299,8 @@ def process_issue(state: WorkflowState) -> WorkflowState:
         if success:
             # Commit the change
             git_manager = GitRepoManager()
-            git_manager._repo_path = state.repo_path
-            git_manager.repo = git_manager._repo_path
+            git_manager.repo_path = state.repo_path
+            git_manager.repo = Repo(state.repo_path)
 
             commit_message = f"Fix SonarQube issue: {issue_key}\n\n{issue['message']}"
             git_manager.commit_changes(file_path, commit_message)
@@ -326,8 +344,8 @@ def create_pull_request(state: WorkflowState) -> WorkflowState:
     try:
         # Push the branch
         git_manager = GitRepoManager()
-        git_manager._repo_path = state.repo_path
-        git_manager.repo = git_manager._repo_path
+        git_manager.repo_path = state.repo_path
+        git_manager.repo = Repo(state.repo_path)
 
         logger.info(f"Pushing branch {state.branch_name} to remote")
         git_manager.push_branch(state.branch_name)
@@ -374,7 +392,7 @@ def cleanup(state: WorkflowState) -> WorkflowState:
         # Clean up Git repository
         if state.repo_path:
             git_manager = GitRepoManager()
-            git_manager._repo_path = state.repo_path
+            git_manager.repo_path = state.repo_path
             git_manager.cleanup()
 
     except Exception as e:
